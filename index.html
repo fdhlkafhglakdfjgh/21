@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Globe</title>
+    <style>
+        body {
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background-color: #000;
+        }
+        #canvas {
+            display: block;
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <button id="startRotation">Запустить анимацию</button>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let scene, camera, renderer, controls;
+        let globe, starField;
+        let textures = [];
+        const textureUrls = [
+            // Прямые ссылки на изображения из Google Drive
+            'https://drive.google.com/uc?id=1mOroZGiu13jptKXGLbLHdy0K4cVFRWS-',
+            'https://drive.google.com/uc?id=1H4bz1DfGbGc49ilwKJu8hD_G3PNEc7jK',
+            'https://drive.google.com/uc?id=1QYWF5Sl2B51BreUtW9TCtoLFYnposk0L'
+        ];
+
+        let isRotating = false;
+        let currentTextureIndex = 0;
+        let nextTextureIndex = 1;
+        let rotationCount = 0;
+        const ROTATION_SPEED = 0.005;
+        const FULL_ROTATION = Math.PI * 2;
+        let accumulatedRotation = 0;
+        let transitionProgress = 0;
+        let isTransitioning = false;
+        const TRANSITION_SPEED = 0.01;
+
+        function init() {
+            // Создание сцены, камеры и рендера
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('canvas'), antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            camera.position.z = 5;
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            createGlobe(); // Создаём сферу (глобус)
+            createStarField(); // Создаём звёздное поле
+            loadTextures(); // Загружаем текстуры из ссылок
+
+            window.addEventListener('resize', onWindowResize, false);
+
+            animate();
+        }
+
+        function createGlobe() {
+            // Геометрия сферы и шейдеры для анимации текстур
+            const geometry = new THREE.SphereGeometry(2, 32, 32);
+            const material = new THREE.ShaderMaterial({
+                uniforms: {
+                    texture1: { value: null },
+                    texture2: { value: null },
+                    mixture: { value: 0.0 }
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform sampler2D texture1;
+                    uniform sampler2D texture2;
+                    uniform float mixture;
+                    varying vec2 vUv;
+                    void main() {
+                        vec4 color1 = texture2D(texture1, vUv);
+                        vec4 color2 = texture2D(texture2, vUv);
+                        gl_FragColor = mix(color1, color2, mixture);
+                    }
+                `,
+                transparent: true
+            });
+            globe = new THREE.Mesh(geometry, material);
+            scene.add(globe);
+        }
+
+        function createStarField() {
+            // Генерация звёздного поля
+            const starGeometry = new THREE.BufferGeometry();
+            const starMaterial = new THREE.PointsMaterial({
+                color: 0xFFFFFF,
+                size: 0.05
+            });
+
+            const starVertices = [];
+            for (let i = 0; i < 1000; i++) {
+                const x = (Math.random() - 0.5) * 100;
+                const y = (Math.random() - 0.5) * 100;
+                const z = (Math.random() - 0.5) * 100;
+                starVertices.push(x, y, z);
+            }
+
+            starGeometry.setAttribute('position', new THREE.Float32BufferAttribute(starVertices, 3));
+            starField = new THREE.Points(starGeometry, starMaterial);
+            scene.add(starField);
+        }
+
+        function loadTextures() {
+            // Загрузка текстур из Google Drive
+            const loader = new THREE.TextureLoader();
+            textureUrls.forEach((url, index) => {
+                loader.load(url, (texture) => {
+                    textures[index] = texture;
+
+                    // Устанавливаем первую текстуру как начальную
+                    if (index === 0) {
+                        globe.material.uniforms.texture1.value = texture;
+                        globe.material.uniforms.texture2.value = texture;
+                    }
+                });
+            });
+        }
+
+        function startRotationAnimation() {
+            // Запуск анимации смены текстур
+            if (textures.length >= 3) {
+                isRotating = true;
+                currentTextureIndex = 0;
+                nextTextureIndex = 1;
+                rotationCount = 0;
+                accumulatedRotation = 0;
+                transitionProgress = 0;
+                isTransitioning = false;
+                globe.material.uniforms.texture1.value = textures[currentTextureIndex];
+                globe.material.uniforms.texture2.value = textures[currentTextureIndex];
+                globe.material.uniforms.mixture.value = 0;
+            } else {
+                console.error('Недостаточно текстур для анимации');
+            }
+        }
+
+        function startTextureTransition() {
+            if (!isTransitioning) {
+                isTransitioning = true;
+                transitionProgress = 0;
+                nextTextureIndex = (currentTextureIndex + 1) % textures.length;
+                globe.material.uniforms.texture1.value = textures[currentTextureIndex];
+                globe.material.uniforms.texture2.value = textures[nextTextureIndex];
+                globe.material.uniforms.mixture.value = 0;
+            }
+        }
+
+        function updateTextureTransition() {
+            if (!isTransitioning) return;
+
+            transitionProgress += TRANSITION_SPEED;
+            globe.material.uniforms.mixture.value = transitionProgress;
+
+            if (transitionProgress >= 1.0) {
+                isTransitioning = false;
+                currentTextureIndex = nextTextureIndex;
+                globe.material.uniforms.texture1.value = textures[currentTextureIndex];
+                globe.material.uniforms.texture2.value = textures[currentTextureIndex];
+                globe.material.uniforms.mixture.value = 0;
+                transitionProgress = 0;
+                rotationCount++;
+
+                if (rotationCount >= textures.length) {
+                    isRotating = false;
+                    rotationCount = 0;
+                }
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            starField.rotation.y += 0.0005;
+
+            if (isRotating) {
+                globe.rotation.y += ROTATION_SPEED;
+                accumulatedRotation += ROTATION_SPEED;
+
+                if (accumulatedRotation >= FULL_ROTATION && !isTransitioning) {
+                    accumulatedRotation = 0;
+                    startTextureTransition();
+                }
+            }
+
+            if (isTransitioning) {
+                updateTextureTransition();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // Запуск инициализации
+        init();
+        document.getElementById('startRotation').addEventListener('click', startRotationAnimation);
+    </script>
+</body>
+</html>
